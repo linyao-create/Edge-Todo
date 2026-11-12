@@ -1,0 +1,41 @@
+.build/
+.swiftpm/
+.DS_Store
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+*.mobileprovision
+local-config/
+
+# Personal app data and local databases
+todos.json
+feishu-sync.json
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Generated packages and private audit evidence
+*.dmg
+*.pkg
+*.zip
+docs/audits/
+
+countdowns.json
+feishu-settings.json
+feishu-sync/
+setup-seen
+*.app/
+dist/
