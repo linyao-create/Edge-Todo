@@ -11,6 +11,9 @@ enum PanelTheme {
 
     static let panel = Color(nsColor: rgb(0xfbfbfd))
     static let panelBorder = Color(nsColor: rgb(0x58566f)).opacity(0.17)
+    static let glassBorder = Color(nsColor: rgb(0xc4c1ce)).opacity(0.20)
+    static let glassInnerHighlight = Color.white.opacity(0.18)
+    static let glassShadow = Color(nsColor: rgb(0x4d495a)).opacity(0.05)
     static let panelShadow = Color(nsColor: rgb(0x2b2843)).opacity(0.13)
     static let textNS = rgb(0x292832)
     static let completedNS = rgb(0x77737f)

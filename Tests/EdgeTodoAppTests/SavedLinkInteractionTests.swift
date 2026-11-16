@@ -41,7 +41,7 @@ final class SavedLinkInteractionTests: XCTestCase {
 
     func testSavedLinkMenuListsPrimaryAndSecondaryActions() {
         XCTAssertEqual(SavedLinkMenuAction.allCases.map(\.rawValue), [
-            "打开网页", "删除链接"
+            "在 Edge 中打开", "删除链接"
         ])
     }
 

@@ -70,6 +70,10 @@ final class EdgePanelWindowController: NSObject, ObservableObject {
             - EdgePanelLayout.spacing * stackSpacingCount - errorSpace)
     }
 
+    var notesCount: Int {
+        TodoStore.notesCount(todos)
+    }
+
     var visibleRows: [Todo] {
         var rows = todos.filter { $0.category == selectedCategory && $0.isVisible(at: currentDate) }
         if selectedCategory == .today { rows = rows.filter { !$0.isCompleted } + rows.filter { $0.isCompleted } }
@@ -113,6 +117,8 @@ final class EdgePanelWindowController: NSObject, ObservableObject {
         window.contentView = NSHostingView(rootView: EdgePanelView(controller: self))
         NotificationCenter.default.addObserver(self, selector: #selector(itemsChanged),
             name: .edgeTodoItemsChanged, object: store)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(accessibilityDisplayOptionsChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         dateTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.refresh() }
         }
@@ -125,6 +131,7 @@ final class EdgePanelWindowController: NSObject, ObservableObject {
         dateTimer?.invalidate()
         dateTimer = nil
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         interaction.cancel()
         window.orderOut(nil)
         window.contentView = nil
@@ -151,6 +158,7 @@ final class EdgePanelWindowController: NSObject, ObservableObject {
 
     func togglePinned() {
         isPinned.toggle()
+        updateWindowShadow()
         if let displayID { selectionStore.setPinned(isPinned, displayID: displayID) }
         interaction.setPinned(isPinned)
         if !isPinned && !window.frame.contains(NSEvent.mouseLocation) { interaction.pointerExited() }
@@ -280,7 +288,13 @@ final class EdgePanelWindowController: NSObject, ObservableObject {
     }
 
     func openSavedLink(_ link: SavedLinkNote) {
-        if !NSWorkspace.shared.open(link.url) {
+        if let edgeURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.edgemac") {
+            NSWorkspace.shared.open([link.url], withApplicationAt: edgeURL,
+                configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+                guard let error else { return }
+                Task { @MainActor [weak self] in self?.report(error, action: "打开网页") }
+            }
+        } else if !NSWorkspace.shared.open(link.url) {
             report(CocoaError(.fileReadNoSuchFile), action: "打开网页")
         }
     }
@@ -334,11 +348,21 @@ final class EdgePanelWindowController: NSObject, ObservableObject {
         if atEnd { focusAtEndRequest = focusRequest }
     }
 
+    @objc private func accessibilityDisplayOptionsChanged() {
+        updateWindowShadow()
+    }
+
+    private func updateWindowShadow() {
+        window.hasShadow = PinnedMaterialPolicy.useWindowShadow(
+            isExpanded: isExpanded, isPinned: isPinned,
+            reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency)
+    }
+
     private func setExpanded(_ expanded: Bool) {
         guard !isDisposed else { return }
         if !expanded { finishDraft() }
         isExpanded = expanded
-        window.hasShadow = expanded
+        updateWindowShadow()
         if expanded {
             selectedCategory = selectionStore.category
             refresh()

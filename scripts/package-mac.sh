@@ -32,6 +32,7 @@ distribution="$temporary/EdgeTodo 安装"
 app="$distribution/EdgeTodo.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$project/AppBundle/Contents/Info.plist" "$app/Contents/"
+cp "$project/AppBundle/Contents/Resources/AppIcon.icns" "$app/Contents/Resources/"
 lipo -create "$temporary/arm64-binary" "$temporary/x86_64-binary" -output "$app/Contents/MacOS/EdgeTodoApp"
 python3 - "$app/Contents/MacOS/EdgeTodoApp" "$project" <<'PY'
 import os

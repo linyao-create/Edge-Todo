@@ -109,6 +109,33 @@ final class TaskHitRegionTests: XCTestCase {
         XCTAssertEqual(NSCursor.current, NSCursor.iBeam)
     }
 
+    @MainActor func testCheckboxPointerAndClickRemainCorrectForActiveAndCompletedRows() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 120), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close(); NSCursor.arrow.set() }
+        let content = try XCTUnwrap(window.contentView)
+        let router = TaskInteractionRouter.RouterView()
+        content.addSubview(router)
+        let active = UUID(), completed = UUID()
+        router.rows = [active: CGRect(x: 0, y: 0, width: 290, height: 50), completed: CGRect(x: 0, y: 60, width: 290, height: 50)]
+        router.checkboxes = [active: [CGRect(x: 2, y: 10, width: 18, height: 20)], completed: [CGRect(x: 2, y: 70, width: 18, height: 20)]]
+        router.eligible = [active]
+        func event(_ kind: NSEvent.EventType, _ point: CGPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: kind, location: point, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        for point in [CGPoint(x: 3, y: 11), CGPoint(x: 19, y: 11), CGPoint(x: 3, y: 29), CGPoint(x: 19, y: 29), CGPoint(x: 10, y: 80)] {
+            _ = router.route(event(.mouseMoved, CGPoint(x: 100, y: point.y)))
+            _ = router.route(event(.mouseMoved, point))
+            XCTAssertEqual(NSCursor.current, NSCursor.pointingHand)
+            XCTAssertNotNil(router.route(event(.leftMouseDown, point)), "Checkbox clicks must reach the button")
+            XCTAssertNotNil(router.route(event(.leftMouseUp, point)))
+        }
+        _ = router.route(event(.mouseMoved, CGPoint(x: 100, y: 30)))
+        XCTAssertEqual(NSCursor.current, NSCursor.openHand)
+    }
+
     func testTextControlsAndWhitespaceHaveSeparateOwnership() {
         let row = CGRect(x: 0, y: 0, width: 300, height: 80)
         let text = [CGRect(x: 30, y: 10, width: 200, height: 18), CGRect(x: 30, y: 30, width: 90, height: 18)]

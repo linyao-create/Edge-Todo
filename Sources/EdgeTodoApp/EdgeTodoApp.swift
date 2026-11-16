@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dataDirectory: URL?
     private var browserCaptureReceiver: BrowserCaptureReceiver?
     private var pendingBrowserURLs: [URL] = []
+    private let browserCaptureToast = NativeCaptureToast()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Keep Edge Todo as a lightweight menu-bar-less panel app. The panel
@@ -90,19 +91,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 revealPanelAtPointer()
                 continue
             }
+            let anchor = NSEvent.mouseLocation
             do {
-                let note = try receiver.receive(url)
+                _ = try receiver.receive(url)
                 NotificationCenter.default.post(name: Notification.Name("EdgeTodo.itemsChanged"), object: store)
-                // Reveal on the display where the user clicked, without opening
-                // panels on every monitor or starting a text-editing session.
-                revealPanelAtPointer(noteID: note.id)
+                browserCaptureToast.show(message: "已存入随记", isError: false, anchor: anchor)
             } catch {
-                let alert = NSAlert()
-                alert.messageText = "未能存到随记"
-                alert.informativeText = error.localizedDescription
-                alert.addButton(withTitle: "好")
-                NSApp.activate(ignoringOtherApps: true)
-                alert.runModal()
+                browserCaptureToast.show(message: error.localizedDescription, isError: true, anchor: anchor)
             }
         }
     }
@@ -168,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             let alert = NSAlert()
             alert.messageText = "连接飞书"
-            alert.informativeText = "请告诉你的 AI：帮我连接 Edge Todo 和我的飞书。"
+            alert.informativeText = "请告诉你的 AI：帮我连接一角和我的飞书。"
             alert.addButton(withTitle: "好")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()

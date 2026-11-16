@@ -3,11 +3,14 @@ import Foundation
 enum TodoStoreError: Error, Equatable, LocalizedError {
     case emptyText
     case notFound
+    case notesLimitReached
 
     var errorDescription: String? {
         switch self {
         case .emptyText:
             return "内容不能为空"
+        case .notesLimitReached:
+            return "随记已满 20 条，整理后可继续添加。"
         case .notFound:
             return "这条内容已经不存在，可能刚刚被删除"
         }
@@ -15,6 +18,10 @@ enum TodoStoreError: Error, Equatable, LocalizedError {
 }
 
 final class TodoStore {
+    static let notesLimit = 20
+    static func notesCount(_ todos: [Todo]) -> Int {
+        todos.filter { $0.category == .notes && !$0.isDeleted && !TodoEditingBehavior.shouldDeleteRow(text: $0.text) }.count
+    }
     private let fileURL: URL
     var countdownFileURL: URL { fileURL.deletingLastPathComponent().appendingPathComponent("countdowns.json") }
     private let encoder: JSONEncoder
@@ -127,6 +134,9 @@ final class TodoStore {
         }
         merged.append(contentsOf: existing.filter { $0.isDeleted })
         guard Set(merged.map(\.id)).count == merged.count else { throw TodoStoreError.notFound }
+        guard Self.notesCount(merged) <= max(Self.notesLimit, Self.notesCount(existing)) else {
+            throw TodoStoreError.notesLimitReached
+        }
         try persist(merged)
     }
 

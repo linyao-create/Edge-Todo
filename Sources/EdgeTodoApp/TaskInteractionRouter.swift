@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum TaskHitRegion: Equatable {
-    case outside, control, clock, text, blank
+    case outside, control, clock, checkbox, text, blank
     static func classify(_ point: CGPoint, row: CGRect, text: [CGRect], controls: [CGRect], clocks: [CGRect] = []) -> TaskHitRegion {
         guard row.contains(point) else { return .outside }
         if clocks.contains(where: { $0.contains(point) }) { return .clock }
@@ -13,6 +13,13 @@ enum TaskHitRegion: Equatable {
 }
 
 struct TaskControlFrames: PreferenceKey {
+    static let defaultValue: [UUID: [CGRect]] = [:]
+    static func reduce(value: inout [UUID: [CGRect]], nextValue: () -> [UUID: [CGRect]]) {
+        for (id, frames) in nextValue() { value[id, default: []].append(contentsOf: frames) }
+    }
+}
+
+struct TaskCheckboxFrames: PreferenceKey {
     static let defaultValue: [UUID: [CGRect]] = [:]
     static func reduce(value: inout [UUID: [CGRect]], nextValue: () -> [UUID: [CGRect]]) {
         for (id, frames) in nextValue() { value[id, default: []].append(contentsOf: frames) }
@@ -33,6 +40,7 @@ struct TaskInteractionRouter: NSViewRepresentable {
     let rows: [UUID: CGRect]
     let controls: [UUID: [CGRect]]
     let clocks: [UUID: [CGRect]]
+    let checkboxes: [UUID: [CGRect]]
     let eligible: Set<UUID>
     let onMove: (UUID, CGPoint) -> Void
     let onFinish: (UUID) -> Void
@@ -40,7 +48,7 @@ struct TaskInteractionRouter: NSViewRepresentable {
 
     func makeNSView(context: Context) -> RouterView { RouterView() }
     func updateNSView(_ view: RouterView, context: Context) {
-        view.rows = rows; view.controls = controls; view.clocks = clocks; view.eligible = eligible
+        view.rows = rows; view.controls = controls; view.clocks = clocks; view.checkboxes = checkboxes; view.eligible = eligible
         view.onMove = onMove; view.onFinish = onFinish; view.onCancel = onCancel
     }
 
@@ -48,6 +56,7 @@ struct TaskInteractionRouter: NSViewRepresentable {
         var rows: [UUID: CGRect] = [:]
         var controls: [UUID: [CGRect]] = [:]
         var clocks: [UUID: [CGRect]] = [:]
+        var checkboxes: [UUID: [CGRect]] = [:]
         var eligible: Set<UUID> = []
         var onMove: (UUID, CGPoint) -> Void = { _, _ in }
         var onFinish: (UUID) -> Void = { _ in }
@@ -84,7 +93,9 @@ struct TaskInteractionRouter: NSViewRepresentable {
         }
 
         private func target(at point: CGPoint, content: NSView) -> (UUID, TaskHitRegion)? {
-            for (id, frame) in rows where eligible.contains(id) && frame.contains(point) {
+            for (id, frame) in rows where frame.contains(point) {
+                if (checkboxes[id] ?? []).contains(where: { $0.contains(point) }) { return (id, .checkbox) }
+                guard eligible.contains(id) else { continue }
                 return (id, TaskHitRegion.classify(point, row: frame, text: textRects(in: content, row: frame), controls: controls[id] ?? [], clocks: clocks[id] ?? []))
             }
             return nil
@@ -117,7 +128,7 @@ struct TaskInteractionRouter: NSViewRepresentable {
                 if session.active { onFinish(session.id) }
                 if let (_, hit) = target(at: point, content: content) {
                     if hit == .blank { NSCursor.openHand.set() }
-                    else if hit == .clock { NSCursor.pointingHand.set() }
+                    else if hit == .clock || hit == .checkbox { NSCursor.pointingHand.set() }
                     else if hit == .text { NSCursor.iBeam.set() }
                     else { NSCursor.arrow.set() }
                 } else { NSCursor.arrow.set() }
@@ -131,7 +142,7 @@ struct TaskInteractionRouter: NSViewRepresentable {
                     switch hit {
                     case .blank: NSCursor.openHand.set(); cursorOwned = true; return event.type == .cursorUpdate ? nil : event
                     case .text: NSCursor.iBeam.set(); cursorOwned = true; return event.type == .cursorUpdate ? nil : event
-                    case .clock:
+                    case .clock, .checkbox:
                         if NSCursor.current != NSCursor.pointingHand { NSCursor.pointingHand.set() }
                         cursorOwned = true
                         return event.type == .cursorUpdate ? nil : event

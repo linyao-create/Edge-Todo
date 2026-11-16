@@ -2,31 +2,43 @@ import AppKit
 import SwiftUI
 
 enum SavedLinkMenuAction: String, CaseIterable {
-    case open = "打开网页"
+    case open = "在 Edge 中打开"
     case delete = "删除链接"
 }
 
 struct EdgePanelView: View {
     @ObservedObject var controller: EdgePanelWindowController
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
     @State private var hoveredRowID: UUID?
     @State private var hoveredLinkTitleID: UUID?
     @State private var isCollapsedHandleHovered = false
+    @StateObject private var headerTools = HeaderToolsVisibility()
     @State private var rowFrames: [UUID: CGRect] = [:]
     @State private var dragOrder: [UUID] = []
     @State private var draggedID: UUID?
+    @State private var completionHolds: [UUID: CompletionPlacement.Hold] = [:]
+    @State private var completionTasks: [UUID: Task<Void, Never>] = [:]
+    @State private var completionTokens: [UUID: UUID] = [:]
     @State private var controlFrames: [UUID: [CGRect]] = [:]
     @State private var clockFrames: [UUID: [CGRect]] = [:]
+    @State private var checkboxFrames: [UUID: [CGRect]] = [:]
 
     private var displayedRows: [Todo] {
         let rows = controller.visibleRows
-        guard !dragOrder.isEmpty else { return rows }
-        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
-        let ordered = dragOrder.compactMap { byID[$0] }
-        let ids = Set(dragOrder)
-        return ordered + rows.filter { !ids.contains($0.id) }
+        let ordered: [Todo]
+        if dragOrder.isEmpty { ordered = rows }
+        else {
+            let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+            let ids = Set(dragOrder)
+            ordered = dragOrder.compactMap { byID[$0] } + rows.filter { !ids.contains($0.id) }
+        }
+        return CompletionPlacement.apply(ordered, holds: completionHolds)
     }
 
+    private func presentedAsCompleted(_ todo: Todo) -> Bool {
+        completionHolds[todo.id]?.wasCompleted ?? todo.isCompleted
+    }
 
     @State private var selectedCountdownID: UUID?
 
@@ -46,7 +58,7 @@ struct EdgePanelView: View {
                         ScrollView(.vertical) {
                             VStack(alignment: .leading, spacing: 0) {
                                 ForEach(displayedRows) { todo in
-                                    if controller.selectedCategory == .today && todo.id == displayedRows.first(where: \.isCompleted)?.id {
+                                    if controller.selectedCategory == .today && todo.id == displayedRows.first(where: { presentedAsCompleted($0) })?.id {
                                         Rectangle().fill(PanelTheme.panelBorder)
                                             .frame(height: 0.5)
                                             .padding(.horizontal, 3)
@@ -59,6 +71,7 @@ struct EdgePanelView: View {
                             .onPreferenceChange(TaskRowFrames.self) { rowFrames = $0 }
                             .onPreferenceChange(TaskControlFrames.self) { controlFrames = $0 }
                             .onPreferenceChange(TaskClockFrames.self) { clockFrames = $0 }
+                            .onPreferenceChange(TaskCheckboxFrames.self) { checkboxFrames = $0 }
                             .padding(.trailing, controller.selectedCategory == .today ? 10 : 20)
                             .background(SlimOverlayScrollerInstaller())
                             .background { interactionRouter }
@@ -86,21 +99,39 @@ struct EdgePanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             if controller.isExpanded {
-                Rectangle().fill(PanelTheme.panel)
+                if PinnedMaterialPolicy.useMaterial(isPinned: controller.isPinned, reduceTransparency: reduceTransparency) {
+                    ZStack {
+                        PinnedPanelMaterial()
+                        PanelTheme.panel.opacity(0.08)
+                    }.allowsHitTesting(false)
+                } else {
+                    Rectangle().fill(PanelTheme.panel)
+                }
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: controller.isExpanded ? EdgePanelLayout.cornerRadius : 0))
         .shadow(
-            color: controller.isExpanded ? PanelTheme.panelShadow : .clear,
-            radius: controller.isExpanded ? 38 : 0,
+            color: controller.isExpanded ? (PinnedMaterialPolicy.useMaterial(isPinned: controller.isPinned, reduceTransparency: reduceTransparency) ? PanelTheme.glassShadow : (controller.isPinned ? PanelTheme.panelShadow.opacity(0.65) : PanelTheme.panelShadow)) : .clear,
+            radius: controller.isExpanded ? (PinnedMaterialPolicy.useMaterial(isPinned: controller.isPinned, reduceTransparency: reduceTransparency) ? 16 : (controller.isPinned ? 26 : 38)) : 0,
             x: 0,
-            y: controller.isExpanded ? 15 : 0
+            y: controller.isExpanded ? (PinnedMaterialPolicy.useMaterial(isPinned: controller.isPinned, reduceTransparency: reduceTransparency) ? 5 : (controller.isPinned ? 10 : 15)) : 0
         )
         .overlay {
             if controller.isExpanded {
-                RoundedRectangle(cornerRadius: EdgePanelLayout.cornerRadius)
-                    .strokeBorder(PanelTheme.panelBorder, lineWidth: 1)
-                    .allowsHitTesting(false)
+                if PinnedMaterialPolicy.useMaterial(isPinned: controller.isPinned, reduceTransparency: reduceTransparency) {
+                    RoundedRectangle(cornerRadius: EdgePanelLayout.cornerRadius)
+                        .strokeBorder(PanelTheme.glassBorder, lineWidth: 0.5)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: EdgePanelLayout.cornerRadius)
+                                .inset(by: 1)
+                                .strokeBorder(PanelTheme.glassInnerHighlight, lineWidth: 0.5)
+                        }
+                        .allowsHitTesting(false)
+                } else {
+                    RoundedRectangle(cornerRadius: EdgePanelLayout.cornerRadius)
+                        .strokeBorder(controller.isPinned ? PanelTheme.panelBorder.opacity(0.65) : PanelTheme.panelBorder, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .overlay(alignment: .trailing) {
@@ -121,6 +152,9 @@ struct EdgePanelView: View {
                     .animation(reduceMotion ? nil : .easeInOut(duration: CollapsedHandleStyle.animationDuration), value: isCollapsedHandleHovered)
             }
         }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
+            reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        }
         .onChange(of: controller.isExpanded) { _, expanded in if !expanded { selectedCountdownID = nil } }
         .onChange(of: controller.selectedCategory) { _, _ in selectedCountdownID = nil }
         .onHover { hovering in
@@ -132,7 +166,7 @@ struct EdgePanelView: View {
         let eligibleIDs = Set(controller.todos.filter {
             $0.category == .today && !$0.isCompleted && $0.isVisible(at: controller.currentDate)
         }.map(\.id))
-        return TaskInteractionRouter(rows: rowFrames, controls: controlFrames, clocks: clockFrames, eligible: eligibleIDs,
+        return TaskInteractionRouter(rows: rowFrames, controls: controlFrames, clocks: clockFrames, checkboxes: checkboxFrames, eligible: eligibleIDs,
             onMove: { id, point in
                 if let todo = controller.todos.first(where: { $0.id == id }) { updateDrag(todo: todo, point: point) }
             }, onFinish: { id in
@@ -147,7 +181,8 @@ struct EdgePanelView: View {
                 HStack(spacing: 0) {
                     ForEach(TodoCategory.allCases, id: \.self) { category in
                         CategoryTabButton(category: category,
-                            isSelected: controller.selectedCategory == category) {
+                            isSelected: controller.selectedCategory == category,
+                            count: category == .notes ? controller.notesCount : nil) {
                             controller.selectCategory(category)
                         }
                     }
@@ -162,7 +197,9 @@ struct EdgePanelView: View {
                 }
                 Spacer(minLength: 0)
                 PinPanelButton(controller: controller)
+                    .opacity(HeaderToolsAppearance.opacity(revealed: headerTools.isRevealed, pinned: controller.isPinned))
                 ArchiveTableButton(action: controller.openArchive)
+                    .opacity(HeaderToolsAppearance.opacity(revealed: headerTools.isRevealed, pinned: false))
             }
             .frame(height: 37)
             HStack {
@@ -172,7 +209,7 @@ struct EdgePanelView: View {
                         Text(controller.currentDate, format: .dateTime.weekday(.wide).locale(Locale(identifier: "zh_CN")))
                     }
                 } else {
-                    Text("随记")
+                    Text("随记：上限 20 条")
                 }
                 Spacer(minLength: 2)
                 if let sync = controller.archiveSync { ArchiveSyncWarning(sync: sync) }
@@ -181,12 +218,23 @@ struct EdgePanelView: View {
             .padding(.horizontal, 3)
             .frame(height: 29)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering { headerTools.pointerEntered() } else { headerTools.pointerExited() }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: headerTools.isRevealed)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: controller.isPinned)
+        .onDisappear { headerTools.reset() }
     }
 
     private func row(_ todo: Todo) -> some View {
         let hasContent = !TodoEditingBehavior.shouldDeleteRow(text: todo.text)
         let isSaved = controller.todos.contains { $0.id == todo.id }
         let isHovered = hoveredRowID == todo.id
+        let subtleHover = TaskHoverAppearance.useSubtleHighlight(isHovered: isHovered,
+            isToday: todo.category == .today, isDragging: draggedID == todo.id,
+            isPinned: controller.isPinned, reduceTransparency: reduceTransparency)
         return HStack(alignment: .top, spacing: 9) {
             Group {
                 if !isSaved {
@@ -205,28 +253,26 @@ struct EdgePanelView: View {
                                 .frame(width: 5, height: 5).padding(.leading, 5).padding(.top, 7)
                         }
                 } else {
-                    Button { controller.toggleCompletion(todoID: todo.id) } label: {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(todo.isCompleted ? PanelTheme.checkboxCompleted : .clear)
-                            RoundedRectangle(cornerRadius: 5)
-                                .strokeBorder(todo.isCompleted ? PanelTheme.checkboxCompleted : PanelTheme.checkbox, lineWidth: 1.4)
-                            if todo.isCompleted {
-                                Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(.white)
-                            }
-                        }
+                    Button { toggleCompletionWithFeedback(todo) } label: {
+                        CompletionCheckbox(isCompleted: todo.isCompleted, reduceMotion: reduceMotion)
                         .frame(width: 15, height: 15).contentShape(Rectangle())
                         .frame(width: 17, height: 21, alignment: .topLeading).padding(.top, 2)
                     }
                     .buttonStyle(.plain)
                     .background(GeometryReader { geometry in
-                        Color.clear.preference(key: TaskControlFrames.self, value: [todo.id: [geometry.frame(in: .global)]])
+                        Color.clear
+                            .preference(key: TaskControlFrames.self, value: [todo.id: [geometry.frame(in: .global)]])
+                            .preference(key: TaskCheckboxFrames.self, value: [todo.id: [geometry.frame(in: .global)]])
                     })
                     .accessibilityLabel(todo.isCompleted ? "标记为未完成" : "标记为已完成")
                 }
             }
             .padding(.top, 0)
-            if isSaved, let link = SavedLinkNote(text: todo.text) {
+            if !isSaved && todo.category == .notes && controller.notesCount >= TodoStore.notesLimit {
+                Text("随记已满 20 条，整理后可继续添加。")
+                    .font(.system(size: 12)).foregroundStyle(PanelTheme.placeholder)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if isSaved, let link = SavedLinkNote(text: todo.text) {
                 savedLinkContent(todo: todo, link: link, isHovered: isHovered)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(GeometryReader { geometry in
@@ -278,12 +324,14 @@ struct EdgePanelView: View {
             RoundedRectangle(cornerRadius: 7)
                 .fill(!isSaved
                     ? (controller.focusedRowID == todo.id ? PanelTheme.inputFocusedBackground : .clear)
-                    : (isHovered ? PanelTheme.rowHover : .clear))
+                    : (subtleHover ? Color.white.opacity(0.10) : TaskHoverAppearance.showBackground(isHovered: isHovered,
+                         isToday: todo.category == .today, isDragging: draggedID == todo.id,
+                         isPinned: controller.isPinned, reduceTransparency: reduceTransparency) ? PanelTheme.rowHover : .clear))
                 // A shared hoveredRowID makes the logical state exclusive. Disable
                 // interpolation only on saved-row backgrounds so a previous row
                 // cannot remain visible while the next row appears.
                 .transaction { transaction in
-                    if isSaved { transaction.animation = nil }
+                    if isSaved { transaction.animation = subtleHover && !reduceMotion ? .easeOut(duration: 0.14) : nil }
                 }
         }
         .animation(isSaved || reduceMotion ? nil : .easeInOut(duration: 0.16), value: isHovered)
@@ -295,6 +343,32 @@ struct EdgePanelView: View {
         .onHover { hovering in
             if hovering { hoveredRowID = todo.id }
             else if hoveredRowID == todo.id { hoveredRowID = nil }
+        }
+    }
+
+    private func toggleCompletionWithFeedback(_ todo: Todo) {
+        let id = todo.id
+        completionTasks[id]?.cancel()
+        if !reduceMotion, completionHolds[id] == nil,
+           let index = displayedRows.firstIndex(where: { $0.id == id }) {
+            completionHolds[id] = .init(index: index, wasCompleted: todo.isCompleted)
+        }
+        controller.toggleCompletion(todoID: id) // Persist before any visual delay.
+        guard !reduceMotion, let updated = controller.todos.first(where: { $0.id == id }),
+              updated.isCompleted != completionHolds[id]?.wasCompleted else {
+            completionHolds.removeValue(forKey: id)
+            completionTasks.removeValue(forKey: id)
+            completionTokens.removeValue(forKey: id)
+            return
+        }
+        let token = UUID()
+        completionTokens[id] = token
+        completionTasks[id] = Task { @MainActor in
+            do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
+            guard completionTokens[id] == token else { return }
+            _ = withAnimation(.easeInOut(duration: 0.22)) { completionHolds.removeValue(forKey: id) }
+            completionTokens.removeValue(forKey: id)
+            completionTasks.removeValue(forKey: id)
         }
     }
 
@@ -360,7 +434,7 @@ struct EdgePanelView: View {
                 .pointingHandOnHover()
                 .accessibilityLabel("打开网页：\(link.title)，来源网站：\(link.domain)")
                 .accessibilityHint("按 Return 打开网页；右键可删除链接")
-                .help(sourceImage == nil ? "打开网页网页" : link.domain)
+                .help(sourceImage == nil ? "在 Edge 中打开网页" : link.domain)
 
                 Button { controller.deleteSavedLink(todoID: todo.id) } label: {
                     Image(systemName: "trash")
@@ -508,6 +582,7 @@ private struct PinPanelButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .pointingHandOnHover()
         .help(controller.isPinned ? "取消固定" : "固定面板")
         .accessibilityLabel(controller.isPinned ? "取消固定面板" : "固定面板")
         .accessibilityValue(controller.isPinned ? "已固定" : "未固定")
@@ -537,6 +612,7 @@ private struct ArchiveTableButton: View {
         .buttonStyle(.plain)
         .frame(width: EdgePanelLayout.archiveButtonWidth, height: EdgePanelLayout.archiveButtonHeight)
         .onHover { isHovering = $0 }
+        .pointingHandOnHover()
         .help("打开飞书每日档案表格")
         .animation(.easeOut(duration: 0.12), value: isHovering)
         .accessibilityLabel("打开每日档案表格")
@@ -563,6 +639,7 @@ private struct NotebookIcon: Shape {
 private struct CategoryTabButton: View {
     let category: TodoCategory
     let isSelected: Bool
+    let count: Int?
     let action: () -> Void
     @State private var isHovering = false
 
@@ -571,12 +648,24 @@ private struct CategoryTabButton: View {
             Text(category.title)
                 .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
                 .foregroundStyle(isSelected ? PanelTheme.selectedTab : (isHovering ? PanelTheme.hoveredTab : PanelTheme.tab))
+                .overlay(alignment: .trailing) {
+                    if let count {
+                        Text("\(count)/\(TodoStore.notesLimit)")
+                            .font(.system(size: 9.5, weight: .regular))
+                            .foregroundStyle(PanelTheme.date)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
+                            .frame(width: 36, alignment: .leading)
+                            .offset(x: 43)
+                            .accessibilityHidden(true)
+                    }
+                }
                 .frame(width: 76, height: 26)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .accessibilityLabel(category.title)
+        .accessibilityLabel(count.map { "\(category.title)，\($0) 条，上限 \(TodoStore.notesLimit) 条" } ?? category.title)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
@@ -585,5 +674,32 @@ private struct TaskRowFrames: PreferenceKey {
     static let defaultValue: [UUID: CGRect] = [:]
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct CompletionCheckbox: View {
+    let isCompleted: Bool
+    let reduceMotion: Bool
+    @State private var scale: CGFloat = 1
+    @State private var pulse: Task<Void, Never>?
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 5).fill(isCompleted ? PanelTheme.checkboxCompleted : .clear)
+            RoundedRectangle(cornerRadius: 5).strokeBorder(isCompleted ? PanelTheme.checkboxCompleted : PanelTheme.checkbox, lineWidth: 1.4)
+            Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white).opacity(isCompleted ? 1 : 0)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isCompleted)
+        }
+        .scaleEffect(scale)
+        .onChange(of: isCompleted) { _, _ in
+            pulse?.cancel()
+            guard !reduceMotion else { scale = 1; return }
+            withAnimation(.easeOut(duration: 0.08)) { scale = 1.1 }
+            pulse = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+                withAnimation(.easeOut(duration: 0.10)) { scale = 1 }
+            }
+        }
+        .onDisappear { pulse?.cancel() }
     }
 }

@@ -1,10 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Edge Todo：存当前页到随记",
-  "version": "1.0.1",
-  "description": "单击工具栏图标，将当前网页标题和链接保存到 Mac 上的 Edge Todo 随记。",
-  "permissions": ["activeTab", "scripting"],
-  "background": { "service_worker": "background.js" },
+  "name": "一角：存当前页到随记",
+  "version": "1.1.0",
+  "description": "单击工具栏图标，将当前网页标题和链接保存到 Mac 上的一角随记。",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_title": "存入随记",
     "default_icon": {

@@ -137,7 +137,7 @@ final class PanelLayoutTests: XCTestCase {
         } else {
             XCTAssertLessThanOrEqual(emptyViewport.maxY, root.bounds.maxY - 17 - 66 - EdgePanelLayout.spacing + 1)
         }
-        try store.save((0..<30).map { Todo(text: "第\($0)条较长随记内容，需要换行显示而不是挤到标题区", category: .notes) })
+        try store.save((0..<20).map { Todo(text: "第\($0)条较长随记内容，需要换行显示而不是挤到标题区", category: .notes) })
         controller.refresh()
         try await Task.sleep(for: .milliseconds(100))
         root.layoutSubtreeIfNeeded()

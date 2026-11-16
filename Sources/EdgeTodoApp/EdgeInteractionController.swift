@@ -26,7 +26,7 @@ private final class DispatchCancellation: EdgeCancellable {
     }
 }
 
-private struct DispatchEdgeScheduler: EdgeScheduler {
+struct DispatchEdgeScheduler: EdgeScheduler {
     @discardableResult
     func schedule(after interval: TimeInterval, _ action: @escaping () -> Void) -> EdgeCancellable {
         let workItem = DispatchWorkItem(block: action)
