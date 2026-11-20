@@ -39,3 +39,13 @@ feishu-sync/
 setup-seen
 *.app/
 dist/
+
+# Windows / Visual Studio build outputs and local settings
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+TestResults/
