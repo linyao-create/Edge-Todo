@@ -33,11 +33,15 @@ feishu-sync.json
 *.zip
 docs/audits/
 
+.edgetodo.lock
 countdowns.json
+edgetodo-config.json
 feishu-settings.json
 feishu-sync/
+settings.json
 setup-seen
 *.app/
+!windows/EdgeTodo.App/
 dist/
 
 # Windows / Visual Studio build outputs and local settings
