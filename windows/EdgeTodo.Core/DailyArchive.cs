@@ -333,7 +333,7 @@ public interface IDailyDocumentTransport
 
 public interface ILarkClient
 {
-    Task<string> Run(IReadOnlyList<string> arguments, string? input, TimeSpan timeout, CancellationToken cancellation);
+    Task<string> Run(IReadOnlyList<string> arguments, string? input, TimeSpan timeout, CancellationToken cancellation, string? workingDirectory = null);
 }
 
 public sealed class LarkProcessClient : ILarkClient
@@ -347,9 +347,10 @@ public sealed class LarkProcessClient : ILarkClient
         _profile = profile;
     }
 
-    public async Task<string> Run(IReadOnlyList<string> arguments, string? input, TimeSpan timeout, CancellationToken cancellation)
+    public async Task<string> Run(IReadOnlyList<string> arguments, string? input, TimeSpan timeout, CancellationToken cancellation, string? workingDirectory = null)
     {
         var start = StartInfo(_cliPath, new[] { "--profile=" + _profile }.Concat(arguments).ToArray());
+        if (workingDirectory is not null) start.WorkingDirectory = workingDirectory;
         start.Environment["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1";
         start.Environment["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1";
         using var process = new Process { StartInfo = start };
@@ -369,9 +370,10 @@ public sealed class LarkProcessClient : ILarkClient
             process.StandardInput.Close();
             await process.WaitForExitAsync(linked.Token);
         }
-        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch (Exception) { }
+            cancellation.ThrowIfCancellationRequested();
             throw new ArchiveSyncException("飞书命令超时。");
         }
         var output = await stdout;
@@ -566,9 +568,27 @@ public sealed class FeishuDailyArchiveTransport : IDailyArchiveTransport
         var existing = FeishuArchive.ParseList(lookup, record.DateKey);
         var write = Common("+record-upsert").Concat(["--format", "json"]).ToList();
         if (existing is not null) write.AddRange(["--record-id", existing]);
-        write.AddRange(["--json", record.FieldJson()]);
-        var saved = await _client.Run(write, null, TimeSpan.FromSeconds(40), cancellation);
-        FeishuArchive.ValidateWrite(saved, existing);
+        const string fileName = "record.json";
+        write.AddRange(["--json", "@" + fileName]);
+        // lark-cli resolves @file inside its working directory. Keep each request in its own directory.
+        var directory = Directory.CreateTempSubdirectory("edgetodo-feishu-");
+        var file = Path.Combine(directory.FullName, fileName);
+        try
+        {
+            await File.WriteAllTextAsync(file, record.FieldJson(), cancellation);
+            var saved = await _client.Run(write, null, TimeSpan.FromSeconds(40), cancellation, directory.FullName);
+            FeishuArchive.ValidateWrite(saved, existing);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(file);
+                directory.Delete();
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     private string[] Common(string command) =>

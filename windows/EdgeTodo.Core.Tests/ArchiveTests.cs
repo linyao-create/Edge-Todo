@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Xml.Linq;
 using EdgeTodo;
 using Xunit;
 
@@ -184,6 +186,54 @@ public class DailyArchiveTests
         Assert.Contains("☐ 离线也要保存", transport.Last!.TodoText);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LongChineseNoteSurvivesOfflineAndAutomaticallySyncsToBothDestinations(bool existingRow)
+    {
+        var directory = Directory.CreateTempSubdirectory("edgetodo-archive-");
+        var when = new DateTime(2026, 11, 16, 2, 0, 0, DateTimeKind.Utc);
+        var path = Path.Combine(directory.FullName, "todos.json");
+        var store = new TodoStore(path, () => when);
+        var original = new string('测', 6000) + "\n引号\"和符号 <&> 📝";
+        var cli = new RetryingLarkClient(existingRow, Todo.StartOfLocalDay(when).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture));
+        var retrying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var synced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            using var sync = new ArchiveSyncCoordinator(
+                store, Path.Combine(directory.FullName, "sync.json"),
+                new FeishuDailyArchiveTransport(cli, "base-test", "tblTest"),
+                new FeishuDailyDocumentTransport(cli, "doc-test"),
+                _ => Task.CompletedTask, () => when,
+                retry: TimeSpan.FromMilliseconds(50), statusChanged: status =>
+                {
+                    if (status == "本地已保存，飞书表格、文档稍后重试") retrying.TrySetResult();
+                    if (status == "已保存到每日档案") synced.TrySetResult();
+                });
+            sync.Start();
+            store.Add(original, TodoCategory.Notes);
+            await retrying.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(original, Assert.Single(new TodoStore(path).Load()).Text);
+
+            cli.GoOnline();
+            await synced.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(existingRow, cli.WriteArguments.Contains("--record-id"));
+            Assert.Contains("@record.json", cli.WriteArguments);
+            Assert.True(cli.WriteArguments.Sum(argument => argument.Length) < 1024);
+            using var json = JsonDocument.Parse(cli.Fields);
+            Assert.Equal("• " + original, json.RootElement.GetProperty("随记").GetString());
+            Assert.False(Directory.Exists(cli.PayloadDirectory));
+            var note = XElement.Parse("<root>" + cli.Document + "</root>").Descendants("li").Single();
+            Assert.Equal(original, string.Concat(note.Nodes().Select(node => node is XElement ? "\n" : ((XText)node).Value)));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public async Task UnchangedDayIsNotWrittenAgain()
     {
@@ -250,6 +300,41 @@ public class DailyArchiveTests
             }
             Last = record;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RetryingLarkClient(bool existingRow, string date) : ILarkClient
+    {
+        private volatile bool _online;
+        public IReadOnlyList<string> WriteArguments { get; private set; } = [];
+        public string PayloadDirectory { get; private set; } = "";
+        public string Fields { get; private set; } = "";
+        public string Document { get; private set; } = "";
+
+        public void GoOnline() => _online = true;
+
+        public async Task<string> Run(IReadOnlyList<string> arguments, string? input, TimeSpan timeout, CancellationToken cancellation, string? workingDirectory = null)
+        {
+            if (!_online) throw new ArchiveSyncException("离线");
+            switch (arguments[1])
+            {
+                case "+record-list":
+                    return existingRow
+                        ? $$$"""{"ok":true,"identity":"user","data":{"data":[["{{{date}}}"]],"fields":["日期"],"field_id_list":["fldDate"],"record_id_list":["recTest"],"has_more":false}}"""
+                        : """{"ok":true,"identity":"user","data":{"data":[],"fields":["日期"],"field_id_list":["fldDate"],"record_id_list":[],"has_more":false}}""";
+                case "+record-upsert":
+                    WriteArguments = arguments;
+                    PayloadDirectory = workingDirectory!;
+                    Fields = await File.ReadAllTextAsync(Path.Combine(PayloadDirectory, arguments[^1][1..]), cancellation);
+                    return existingRow
+                        ? """{"ok":true,"identity":"user","data":{"updated":true,"record":{"update":{"recTest":true}}}}"""
+                        : """{"ok":true,"identity":"user","data":{"created":true,"record":{"record_id_list":["recTest"]}}}""";
+                case "+update":
+                    Document = input!;
+                    return """{"ok":true,"identity":"user","data":{"result":"success"}}""";
+                default:
+                    throw new InvalidOperationException(arguments[1]);
+            }
         }
     }
 

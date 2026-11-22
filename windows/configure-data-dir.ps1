@@ -93,7 +93,7 @@ function Split-ProtocolCommandTokens([string]$CommandText) {
 }
 
 function Resolve-ExistingProtocolTarget([string]$CommandText) {
-    $tokens = Split-ProtocolCommandTokens $CommandText
+    $tokens = @(Split-ProtocolCommandTokens $CommandText)
     if ($tokens.Count -eq 0 -or [string]::IsNullOrWhiteSpace($tokens[0])) {
         return $null
     }
@@ -142,14 +142,104 @@ function Get-MergedProtocolCommand([string]$SchemeName) {
     return [pscustomobject]@{ ReadFailed = $false; Command = $null }
 }
 
+function Complete-ProtocolRegistration(
+    [string]$SchemeName,
+    [string]$Command,
+    [string]$PendingFile,
+    [Microsoft.Win32.RegistryKey]$Registry = [Microsoft.Win32.Registry]::CurrentUser
+) {
+    $path = 'Software\Classes'
+    $schemePath = "$path\$SchemeName"
+    $createdKeys = [System.Collections.Generic.List[string]]::new()
+    $changes = [System.Collections.Generic.List[object]]::new()
+    $keys = [System.Collections.Generic.List[Microsoft.Win32.RegistryKey]]::new()
+    try {
+        foreach ($part in @($SchemeName, 'shell', 'open', 'command')) {
+            $path += "\$part"
+            $key = $registry.OpenSubKey($path)
+            if ($null -eq $key) {
+                $key = $registry.CreateSubKey($path)
+                $createdKeys.Add($path)
+            }
+            $keys.Add($key)
+        }
+
+        # Preserve existing protocol metadata and only switch the command after the other values are ready.
+        foreach ($entry in @(
+            @{ Key = $keys[0]; Path = $schemePath; Name = ''; Value = 'URL:一角'; OnlyIfMissing = $true }
+            @{ Key = $keys[0]; Path = $schemePath; Name = 'URL Protocol'; Value = ''; OnlyIfMissing = $true }
+            @{ Key = $keys[3]; Path = $path; Name = ''; Value = $Command; OnlyIfMissing = $false }
+        )) {
+            $exists = $entry.Key.GetValueNames() -contains $entry.Name
+            if ($exists -and $entry.OnlyIfMissing) { continue }
+            $previous = $entry.Key.GetValue($entry.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($previous -is [string] -and $previous -ceq $entry.Value) { continue }
+            $kind = if ($exists) { $entry.Key.GetValueKind($entry.Name) }
+            $writableKey = $registry.OpenSubKey($entry.Path, $true)
+            if ($null -eq $writableKey) { throw "协议注册表项已被移除：$($entry.Key.Name)" }
+            $keys.Add($writableKey)
+            $writableKey.SetValue($entry.Name, $entry.Value, [Microsoft.Win32.RegistryValueKind]::String)
+            $changes.Add(@{ Key = $writableKey; Name = $entry.Name; Exists = $exists; Value = $previous; Kind = $kind })
+        }
+
+        Remove-Item -LiteralPath $PendingFile -Force -ErrorAction Stop
+    }
+    catch {
+        $registrationError = $_
+        $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+        for ($i = $changes.Count - 1; $i -ge 0; $i--) {
+            $change = $changes[$i]
+            try {
+                if ($change.Exists) {
+                    $change.Key.SetValue($change.Name, $change.Value, $change.Kind)
+                }
+                else {
+                    $change.Key.DeleteValue($change.Name, $false)
+                }
+            }
+            catch { $rollbackErrors.Add($_.Exception.Message) }
+        }
+        foreach ($key in $keys) { $key.Dispose() }
+        $keys.Clear()
+        for ($i = $createdKeys.Count - 1; $i -ge 0; $i--) {
+            $created = $createdKeys[$i]
+            try {
+                $key = $registry.OpenSubKey($created)
+                if ($null -eq $key) { continue }
+                try { $empty = $key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0 }
+                finally { $key.Dispose() }
+                if ($empty) { $registry.DeleteSubKey($created, $false) }
+            }
+            catch { $rollbackErrors.Add($_.Exception.Message) }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            throw "注册协议失败，且无法完整恢复原注册表：$($rollbackErrors -join ' / ')。原始错误：$($registrationError.Exception.Message)"
+        }
+        throw
+    }
+    finally {
+        foreach ($key in $keys) { $key.Dispose() }
+    }
+}
+
+$existingTargetIsThisApp = $false
 if ($RegisterProtocol) {
     $merged = Get-MergedProtocolCommand $normalizedScheme
+    $parsedTarget = if ($merged.Command) { Resolve-ExistingProtocolTarget $merged.Command }
+    if ($parsedTarget) {
+        try {
+            $existingExe = [System.IO.Path]::GetFullPath($parsedTarget.ExecutablePath.Trim())
+            $existingTargetIsThisApp = $existingExe.Equals($exePath, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+        catch {
+            if (-not $ForceRegisterProtocol) { throw }
+        }
+    }
     if (-not $ForceRegisterProtocol) {
         if ($merged.ReadFailed) {
             throw "读取现有协议注册表失败，已保留原入口；如确认接管请加 -ForceRegisterProtocol。"
         }
         if (-not [string]::IsNullOrWhiteSpace($merged.Command)) {
-            $parsedTarget = Resolve-ExistingProtocolTarget $merged.Command
             if ($null -eq $parsedTarget) {
                 throw "现有协议命令无法解析，已保留原入口；如确认接管请加 -ForceRegisterProtocol。"
             }
@@ -226,73 +316,77 @@ if (Test-Path -LiteralPath $configPath -PathType Container) {
     throw "配置目标路径被同名文件夹占用：$configPath"
 }
 $pendingPath = "$configPath.pending"
+if (Test-Path -LiteralPath $pendingPath -PathType Container) {
+    throw "配置状态标记路径被同名文件夹占用：$pendingPath"
+}
+$pendingExisted = Test-Path -LiteralPath $pendingPath
+$configExisted = [System.IO.File]::Exists($configPath)
 
 $tempPath = "$configPath.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
 $backupPath = "$configPath.$PID.$([Guid]::NewGuid().ToString('N')).bak"
 $json = $configObject | ConvertTo-Json -Depth 3
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $tempWritten = $false
-$replaced = $false
+$configInstalled = $false
 
 # 写入「配置进行中」标记文件；在主配置就位及协议写入全部完成前一直保留，任何中途失败都会阻止副本误回退默认目录
-[System.IO.File]::WriteAllText($pendingPath, "{`"pid`": $PID, `"startedAt`": `"$((Get-Date).ToString('o'))`"}" + [Environment]::NewLine, $utf8NoBom)
+if (-not $pendingExisted) {
+    [System.IO.File]::WriteAllText($pendingPath, "{`"pid`": $PID, `"startedAt`": `"$((Get-Date).ToString('o'))`"}" + [Environment]::NewLine, $utf8NoBom)
+}
 
 try {
     [System.IO.File]::WriteAllText($tempPath, $json + [Environment]::NewLine, $utf8NoBom)
     $tempWritten = $true
-    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+    if ($configExisted) {
         [System.IO.File]::Replace($tempPath, $configPath, $backupPath, $true)
     }
     else {
         [System.IO.File]::Move($tempPath, $configPath)
     }
-    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-        throw "新配置文件替换后未就位：$configPath"
+    $configInstalled = $true
+    if ($RegisterProtocol) {
+        Complete-ProtocolRegistration $normalizedScheme "`"$exePath`" --data-dir `"$resolvedDataDir`" `"%1`"" $pendingPath
     }
-    $replaced = $true
+    else {
+        Remove-Item -LiteralPath $pendingPath -Force -ErrorAction Stop
+    }
 }
 catch {
-    $writeError = $_
-    # 处理 ReplaceFileW 部分失败：旧配置已重命名为备份而新配置未就位时，优先尝试恢复原配置；恢复失败则保留备份并报错
-    if ((-not (Test-Path -LiteralPath $configPath -PathType Leaf)) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-        try {
-            [System.IO.File]::Move($backupPath, $configPath)
-            throw "写入新配置文件失败，已自动恢复原配置文件：$configPath 。原始错误：$($writeError.Exception.Message)"
-        }
-        catch {
-            if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-                Write-Host "Backup preserved at: $backupPath"
-                throw "写入新配置文件失败，且自动恢复原配置也失败。旧配置备份已完整保留，请勿删除并手动恢复：$backupPath 。原始错误：$($writeError.Exception.Message)"
+    $configurationError = $_
+    try {
+        if ([System.IO.File]::Exists($backupPath)) {
+            if ([System.IO.File]::Exists($configPath)) {
+                [System.IO.File]::Replace($backupPath, $configPath, [NullString]::Value, $true)
             }
-            throw
+            else {
+                [System.IO.File]::Move($backupPath, $configPath)
+            }
         }
+        elseif ($configInstalled -and -not $configExisted -and $existingTargetIsThisApp) {
+            [System.IO.File]::Delete($configPath)
+        }
+        if ($configExisted -and -not [System.IO.File]::Exists($configPath)) {
+            throw "找不到原配置文件：$configPath"
+        }
+        # A prior installation can start again once its original config is back.
+        if (($configExisted -or $existingTargetIsThisApp) -and -not $pendingExisted) {
+            [System.IO.File]::Delete($pendingPath)
+        }
+    }
+    catch {
+        throw "配置失败，且无法自动恢复原应用配置：$($_.Exception.Message)。检查旧配置备份 $backupPath 。原始错误：$($configurationError.Exception.Message)"
     }
     throw
 }
 finally {
-    # 仅在确认新配置已就位后才清理本次生成的备份；失败且未恢复时必须保留备份以防丢失配置或退回默认目录
-    if ($replaced -and (Test-Path -LiteralPath $configPath -PathType Leaf) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
-    }
     # 仅在未写完临时文件，或主配置/备份至少有一个存在时清理临时文件，避免极端双失
     if ((Test-Path -LiteralPath $tempPath -PathType Leaf) -and ((-not $tempWritten) -or (Test-Path -LiteralPath $configPath -PathType Leaf) -or (Test-Path -LiteralPath $backupPath -PathType Leaf))) {
         Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
     }
 }
 
-if ($RegisterProtocol) {
-    $regBase = "HKCU:\Software\Classes\$normalizedScheme"
-    New-Item -Path $regBase -Force | Out-Null
-    Set-ItemProperty -LiteralPath $regBase -Name "(default)" -Value "URL:一角"
-    Set-ItemProperty -LiteralPath $regBase -Name "URL Protocol" -Value ""
-    $regCmd = Join-Path $regBase "shell\open\command"
-    New-Item -Path $regCmd -Force | Out-Null
-    Set-ItemProperty -LiteralPath $regCmd -Name "(default)" -Value "`"$exePath`" --data-dir `"$resolvedDataDir`" `"%1`""
-}
-
-# 放在所有配置和协议写入全部确认完成后的最后一步再清除进行中标记；若移除失败会直接抛错，使副本保持「停止启动」的安全状态
-if (Test-Path -LiteralPath $pendingPath) {
-    Remove-Item -LiteralPath $pendingPath -Force -ErrorAction Stop
+if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+    Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
 }
 
 $leftoverArtifacts = @(Get-ChildItem -LiteralPath $resolvedAppDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'edgetodo-config.json.*' -and ($_.Name -like '*.bak' -or $_.Name -like '*.tmp') })

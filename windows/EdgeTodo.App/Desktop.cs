@@ -137,14 +137,26 @@ public static class ProtocolRegistration
                 return;
         }
 
-        using var key = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{scheme}");
-        key?.SetValue("", "URL:一角");
-        key?.SetValue("URL Protocol", "");
-        using var command = key?.CreateSubKey(@"shell\open\command");
         var argsPart = string.IsNullOrWhiteSpace(configuredDataDirectory)
             ? "\"%1\""
             : $"--data-dir \"{AppPaths.NormalizeDirectory(configuredDataDirectory)}\" \"%1\"";
-        command?.SetValue("", $"\"{normalizedExe}\" {argsPart}");
+        var commandText = $"\"{normalizedExe}\" {argsPart}";
+        var keyPath = $@"Software\Classes\{scheme}";
+        const string commandPath = @"shell\open\command";
+        using (var existingKey = Registry.CurrentUser.OpenSubKey(keyPath))
+        using (var existingCommand = existingKey?.OpenSubKey(commandPath))
+        {
+            if (existingKey?.GetValue("") is not null && existingKey.GetValue("URL Protocol") is not null &&
+                string.Equals(existingCommand?.GetValue("") as string, commandText, StringComparison.Ordinal))
+                return;
+        }
+
+        using var key = Registry.CurrentUser.CreateSubKey(keyPath);
+        if (key.GetValue("") is null) key.SetValue("", "URL:一角");
+        if (key.GetValue("URL Protocol") is null) key.SetValue("URL Protocol", "");
+        using var command = key.CreateSubKey(commandPath);
+        if (!string.Equals(command.GetValue("") as string, commandText, StringComparison.Ordinal))
+            command.SetValue("", commandText);
     }
 }
 
