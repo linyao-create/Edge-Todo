@@ -265,6 +265,89 @@ public class InteractionTests
         Assert.Equal(0, scheduler.Pending);
         Assert.Equal(EdgePanelState.Expanded, interaction.State);
     }
+
+    [Fact]
+    public void EdgeSeamDetectorIdentifiesInnerSeamAcrossDualMonitors()
+    {
+        var left4K = new ScreenBounds(-3840, -248, 0, 1912);
+        var rightPrimary = new ScreenBounds(0, 0, 2560, 1600);
+        var topSecondary = new ScreenBounds(0, -1080, 1920, 0);
+
+        Assert.False(EdgeSeamDetector.HasLeftNeighbor(left4K, [left4K, rightPrimary]));
+        Assert.True(EdgeSeamDetector.HasLeftNeighbor(rightPrimary, [left4K, rightPrimary]));
+        Assert.False(EdgeSeamDetector.HasLeftNeighbor(rightPrimary, [rightPrimary]));
+        Assert.False(EdgeSeamDetector.HasLeftNeighbor(rightPrimary, [rightPrimary, topSecondary]));
+    }
+
+    [Fact]
+    public void EdgeInteractionCanExpandPreventsAccidentalSwipeOpen()
+    {
+        var scheduler = new ManualScheduler();
+        var cursorStillOnHandle = false;
+        var interaction = new EdgeInteractionController(
+            scheduler,
+            dwell: EdgeInteractionDefaults.SeamDwell,
+            canExpand: () => cursorStillOnHandle);
+
+        interaction.PointerEntered();
+        Assert.Equal(1, scheduler.Pending);
+        scheduler.FireNext();
+        Assert.Equal(EdgePanelState.Collapsed, interaction.State);
+
+        cursorStillOnHandle = true;
+        interaction.PointerEntered();
+        scheduler.FireNext();
+        Assert.Equal(EdgePanelState.Expanded, interaction.State);
+    }
+
+    [Fact]
+    public void EdgeInteractionRepeatedPointerExitedDoesNotResetCollapseTimer()
+    {
+        var scheduler = new ManualScheduler();
+        var interaction = new EdgeInteractionController(scheduler);
+        interaction.Reveal();
+
+        interaction.PointerExited();
+        Assert.Equal(1, scheduler.Pending);
+        Assert.True(interaction.IsCollapsePending);
+
+        // 模拟 100ms 看门狗连续多次检测到鼠标已移出：不得反复清空并重启收起倒计时
+        interaction.PointerExited();
+        interaction.PointerExited();
+        Assert.Equal(1, scheduler.Pending);
+
+        scheduler.FireNext();
+        Assert.Equal(EdgePanelState.Collapsed, interaction.State);
+    }
+
+    [Fact]
+    public void EdgeInteractionCanCollapseProtectsEditingAndImmediateCollapseRespectsPin()
+    {
+        var scheduler = new ManualScheduler();
+        var editing = true;
+        var interaction = new EdgeInteractionController(
+            scheduler,
+            canCollapse: () => !editing);
+        interaction.Reveal();
+
+        interaction.PointerExited();
+        scheduler.FireNext();
+        Assert.Equal(EdgePanelState.Expanded, interaction.State);
+
+        editing = false;
+        interaction.PointerExited();
+        scheduler.FireNext();
+        Assert.Equal(EdgePanelState.Collapsed, interaction.State);
+
+        interaction.Reveal();
+        interaction.CollapseImmediately();
+        Assert.Equal(EdgePanelState.Collapsed, interaction.State);
+
+        interaction.Reveal();
+        interaction.SetPinned(true);
+        interaction.CollapseImmediately();
+        Assert.Equal(EdgePanelState.Expanded, interaction.State);
+    }
 }
 
 public class DataIsolationTests

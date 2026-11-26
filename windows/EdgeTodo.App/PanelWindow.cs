@@ -55,6 +55,7 @@ public sealed class PanelWindow : Window
     private readonly TextBlock _notesCount;
     private readonly TextBlock _notesLimitHint;
     private readonly DispatcherTimer _headerTools;
+    private readonly DispatcherTimer _hoverWatchdog;
     private readonly Dictionary<Guid, CompletionPlacement.Hold> _completionHolds = [];
     private readonly Dictionary<Guid, RowView> _views = [];
     private readonly AcrylicBackdrop _backdrop = new();
@@ -67,7 +68,11 @@ public sealed class PanelWindow : Window
     private string? _actionErrorText;
     private bool _pinned;
     private bool _menuOpen;
+    private bool _contextMenuOpen;
     private bool _dragHeldOpen;
+    private long _revealGraceUntil;
+    private Native.Point _handleEnterCursor;
+    private bool _hasHandleEnterCursor;
     private RowView? _draggingRow;
     private List<Guid> _dragOrder = [];
     internal Popup? OpenPopup;
@@ -93,9 +98,18 @@ public sealed class PanelWindow : Window
         _ownsHotkey = ownsHotkey;
         _category = host.Selection.Category;
         _pinned = host.Selection.IsPinned(monitor.Device);
-        _interaction = new EdgeInteractionController(new WpfScheduler(Dispatcher));
+        var dwell = monitor.IsLeftSeam ? EdgeInteractionDefaults.SeamDwell : EdgeInteractionDefaults.OuterDwell;
+        _interaction = new EdgeInteractionController(
+            new WpfScheduler(Dispatcher),
+            dwell: dwell,
+            collapseDelay: EdgeInteractionDefaults.CollapseDelay,
+            canExpand: CanExpandFromHandle,
+            canCollapse: CanCollapseFromCard);
         _interaction.SetPinned(_pinned);
         _interaction.StateChanged += state => Dispatcher.Invoke(() => ApplyState(state == EdgePanelState.Expanded));
+
+        _hoverWatchdog = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+        _hoverWatchdog.Tick += (_, _) => PollExpandedPointer();
 
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -271,7 +285,11 @@ public sealed class PanelWindow : Window
             Effect = _cardShadow,
             Child = cardHost
         };
-        _card.MouseEnter += (_, _) => _interaction.PointerEntered();
+        _card.MouseEnter += (_, _) =>
+        {
+            _revealGraceUntil = 0;
+            _interaction.PointerEntered();
+        };
         _card.MouseLeave += (_, _) => CheckPointerExit();
 
         _handleCapsule = new Border
@@ -296,16 +314,43 @@ public sealed class PanelWindow : Window
         _handle.MouseEnter += (_, _) =>
         {
             _handleCapsule.Background = Theme.HandleHover;
+            _hasHandleEnterCursor = Native.GetCursorPos(out _handleEnterCursor);
             _interaction.PointerEntered();
+        };
+        _handle.MouseMove += (_, _) =>
+        {
+            if (!_monitor.IsLeftSeam || _interaction.State != EdgePanelState.Collapsed || !_interaction.IsExpansionPending)
+                return;
+            if (!Native.GetCursorPos(out var current)) return;
+            if (!_hasHandleEnterCursor)
+            {
+                _handleEnterCursor = current;
+                _hasHandleEnterCursor = true;
+                return;
+            }
+            var scale = _monitor.Dpi > 0 ? _monitor.Dpi / 96.0 : 1.0;
+            var maxDriftPx = EdgeInteractionDefaults.SeamMaxDriftDip * scale;
+            var dx = current.X - _handleEnterCursor.X;
+            var dy = current.Y - _handleEnterCursor.Y;
+            if (dx * dx + dy * dy >= maxDriftPx * maxDriftPx)
+            {
+                _handleEnterCursor = current;
+                _interaction.PointerEntered();
+            }
         };
         _handle.MouseLeave += (_, _) =>
         {
             _handleCapsule.Background = Theme.Handle;
+            _hasHandleEnterCursor = false;
             if (_interaction.State == EdgePanelState.Collapsed) _interaction.PointerExited();
         };
         _handle.MouseLeftButtonDown += (_, _) =>
         {
-            if (_interaction.State == EdgePanelState.Collapsed) _interaction.Reveal();
+            if (_interaction.State == EdgePanelState.Collapsed)
+            {
+                _revealGraceUntil = Environment.TickCount64 + 1500;
+                _interaction.Reveal();
+            }
         };
 
         _root = new Grid { Background = Brushes.Transparent };
@@ -314,6 +359,7 @@ public sealed class PanelWindow : Window
         Content = _root;
 
         PreviewKeyDown += OnPreviewKey;
+        Deactivated += (_, _) => OnWindowDeactivated();
         SourceInitialized += (_, _) =>
         {
             _hwnd = new WindowInteropHelper(this).Handle;
@@ -329,6 +375,8 @@ public sealed class PanelWindow : Window
         };
         Closed += (_, _) =>
         {
+            _hoverWatchdog.Stop();
+            _headerTools.Stop();
             _backdrop.Close();
             if (_ownsHotkey && _hwnd != IntPtr.Zero) Native.UnregisterHotKey(_hwnd, 1);
         };
@@ -346,6 +394,7 @@ public sealed class PanelWindow : Window
             Select(TodoCategory.Notes);
             _focusId = null;
         }
+        _revealGraceUntil = Environment.TickCount64 + 1500;
         _interaction.Reveal();
         if (noteId is Guid target)
         {
@@ -391,10 +440,12 @@ public sealed class PanelWindow : Window
         if (expanded && _card.Visibility == Visibility.Visible)
         {
             Place(true);
+            SyncHoverWatchdog();
             return;
         }
         if (!expanded)
         {
+            _hoverWatchdog.Stop();
             CloseOpenPopups();
             CancelActiveDrag();
             ClearTextSelection();
@@ -406,7 +457,11 @@ public sealed class PanelWindow : Window
             _draftAfter = null;
             _focusId = null;
             _menuOpen = false;
+            _contextMenuOpen = false;
             _dragHeldOpen = false;
+            _revealGraceUntil = 0;
+            _hasHandleEnterCursor = false;
+            _handleCapsule.Background = Theme.Handle;
             _interaction.SetHeldOpen(false);
             _backdrop.HideBackdrop();
         }
@@ -417,6 +472,7 @@ public sealed class PanelWindow : Window
         _handle.Visibility = expanded ? Visibility.Collapsed : Visibility.Visible;
         if (expanded) Render(force: true);
         Place(expanded);
+        SyncHoverWatchdog();
     }
 
     private void Place(bool expanded)
@@ -701,7 +757,9 @@ public sealed class PanelWindow : Window
         _interaction.SetPinned(_pinned);
         UpdateChrome();
         Place(_interaction.State == EdgePanelState.Expanded);
-        if (!_pinned && !CursorInsideCard()) _interaction.PointerExited();
+        SyncHoverWatchdog();
+        if (!_pinned && !IsActivelyEditing() && !CursorInsideCard(EdgeInteractionDefaults.CardExitBufferDip))
+            _interaction.PointerExited();
     }
 
     private void OpenArchive()
@@ -858,7 +916,7 @@ public sealed class PanelWindow : Window
             .Select(r => r.Id)
             .ToList();
         _dragHeldOpen = true;
-        _interaction.SetHeldOpen(true);
+        SyncHeldOpenState();
     }
 
     internal void UpdateRowDrag(Point pointInWindow)
@@ -895,7 +953,7 @@ public sealed class PanelWindow : Window
         _draggingRow = null;
         _dragOrder.Clear();
         _dragHeldOpen = false;
-        _interaction.SetHeldOpen(_menuOpen);
+        _interaction.SetHeldOpen(_menuOpen || _contextMenuOpen);
 
         if (commit && order.Count > 1)
         {
@@ -915,8 +973,7 @@ public sealed class PanelWindow : Window
             Render(force: false);
         }
 
-        if (!_pinned && !_menuOpen && !CursorInsideCard())
-            _interaction.PointerExited();
+        SyncHeldOpenState();
     }
 
     private void CancelActiveDrag()
@@ -1003,8 +1060,25 @@ public sealed class PanelWindow : Window
     internal void Hold(bool held)
     {
         _menuOpen = held;
-        _interaction.SetHeldOpen(held || _dragHeldOpen);
-        if (!held && !_dragHeldOpen && !CursorInsideCard()) _interaction.PointerExited();
+        SyncHeldOpenState();
+    }
+
+    /**
+     * 标记右键上下文菜单打开/关闭状态，防止鼠标移入右键菜单时面板提前收起。
+     * @param {bool} held 是否保持面板展开
+     */
+    internal void HoldContextMenu(bool held)
+    {
+        _contextMenuOpen = held;
+        SyncHeldOpenState();
+    }
+
+    private void SyncHeldOpenState()
+    {
+        var anyHeld = _menuOpen || _contextMenuOpen || _dragHeldOpen;
+        _interaction.SetHeldOpen(anyHeld);
+        if (!anyHeld && !IsActivelyEditing() && !CursorInsideCard(EdgeInteractionDefaults.CardExitBufferDip))
+            _interaction.PointerExited();
     }
 
     internal void ActivateForTyping()
@@ -1027,18 +1101,124 @@ public sealed class PanelWindow : Window
 
     private void CheckPointerExit()
     {
-        if (_menuOpen || _dragHeldOpen || CursorInsideCard()) return;
+        if (_pinned || _menuOpen || _contextMenuOpen || _dragHeldOpen || IsActivelyEditing()) return;
+        if (CursorInsideCard(EdgeInteractionDefaults.CardExitBufferDip)) return;
         ClearTextSelection();
         _interaction.PointerExited();
     }
 
-    private bool CursorInsideCard()
+    /**
+     * 判断当前是否处于面板内活跃文字编辑态（面板为前台激活窗口且行内输入框正持有键盘焦点）。
+     * @returns {bool} true 表示用户正在面板中编辑输入，应暂缓自动收起
+     */
+    private bool IsActivelyEditing()
+    {
+        if (_interaction.State != EdgePanelState.Expanded) return false;
+        var active = IsActive || (_hwnd != IntPtr.Zero && Native.GetForegroundWindow() == _hwnd);
+        if (!active) return false;
+        return _views.Values.Any(view => view.IsComposing || view.KeepsText);
+    }
+
+    /**
+     * 悬停计时到期展开前的二次核实：确认真实全局鼠标仍在小把手上且未滑离。
+     * @returns {bool} 是否允许展开面板
+     */
+    private bool CanExpandFromHandle()
+    {
+        if (_interaction.State != EdgePanelState.Collapsed) return false;
+        var inside = CursorInsideHandle();
+        if (!inside)
+        {
+            _handleCapsule.Background = Theme.Handle;
+            _hasHandleEnterCursor = false;
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 延迟收起计时到期前的二次核实：确认当前仍未固定、未在编辑、未开菜单且鼠标确实在卡片缓冲带之外。
+     * @returns {bool} 是否允许收起面板
+     */
+    private bool CanCollapseFromCard()
+    {
+        if (_pinned || _menuOpen || _contextMenuOpen || _dragHeldOpen || IsActivelyEditing())
+            return false;
+        return !CursorInsideCard(EdgeInteractionDefaults.CardExitBufferDip);
+    }
+
+    /**
+     * 展开态轻量级位置巡检：每 100ms 核对真实全局鼠标坐标，兜底修复跨屏或快速划出时漏发 MouseLeave 导致面板不缩小的问题。
+     */
+    private void PollExpandedPointer()
+    {
+        if (_interaction.State != EdgePanelState.Expanded || _pinned)
+        {
+            _hoverWatchdog.Stop();
+            return;
+        }
+        if (_menuOpen || _contextMenuOpen || _dragHeldOpen || IsActivelyEditing())
+        {
+            _interaction.PointerEntered();
+            return;
+        }
+        if (CursorInsideCard(EdgeInteractionDefaults.CardExitBufferDip))
+        {
+            _revealGraceUntil = 0;
+            _interaction.PointerEntered();
+            return;
+        }
+        if (_revealGraceUntil > 0 && Environment.TickCount64 < _revealGraceUntil)
+            return;
+        ClearTextSelection();
+        _interaction.PointerExited();
+    }
+
+    private void SyncHoverWatchdog()
+    {
+        var shouldRun = _interaction.State == EdgePanelState.Expanded && !_pinned;
+        if (shouldRun && !_hoverWatchdog.IsEnabled) _hoverWatchdog.Start();
+        else if (!shouldRun && _hoverWatchdog.IsEnabled) _hoverWatchdog.Stop();
+    }
+
+    /**
+     * 窗口失活处理：未固定且用户点往桌面或其他软件时（非弹出菜单场景），立即干净收起面板。
+     */
+    private void OnWindowDeactivated()
+    {
+        if (_pinned || _interaction.State != EdgePanelState.Expanded) return;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_pinned || _menuOpen || _contextMenuOpen || _dragHeldOpen || IsActive || _interaction.State != EdgePanelState.Expanded)
+                return;
+            if (CursorInsideCard(EdgeInteractionDefaults.CardExitBufferDip))
+                return;
+            ClearTextSelection();
+            Keyboard.ClearFocus();
+            _interaction.CollapseImmediately();
+        }, DispatcherPriority.Background);
+    }
+
+    private bool CursorInsideHandle()
+    {
+        if (!IsLoaded || _handle.Visibility != Visibility.Visible || _handle.ActualWidth <= 0 || _handle.ActualHeight <= 0 || !Native.GetCursorPos(out var point))
+            return false;
+        var origin = _handle.PointToScreen(new Point(0, 0));
+        var far = _handle.PointToScreen(new Point(_handle.ActualWidth, _handle.ActualHeight));
+        return point.X >= origin.X && point.X < far.X && point.Y >= origin.Y && point.Y < far.Y;
+    }
+
+    private bool CursorInsideCard(double marginDip = 0)
     {
         if (!IsLoaded || _card.Visibility != Visibility.Visible || _card.ActualWidth <= 0 || _card.ActualHeight <= 0 || !Native.GetCursorPos(out var point))
             return false;
         var origin = _card.PointToScreen(new Point(0, 0));
         var far = _card.PointToScreen(new Point(_card.ActualWidth, _card.ActualHeight));
-        return point.X >= origin.X && point.X < far.X && point.Y >= origin.Y && point.Y < far.Y;
+        var scale = _monitor.Dpi > 0 ? _monitor.Dpi / 96.0 : 1.0;
+        var marginPx = marginDip * scale;
+        var leftMarginPx = _monitor.IsLeftSeam ? 0 : marginPx;
+        return point.X >= origin.X - leftMarginPx && point.X < far.X + marginPx
+            && point.Y >= origin.Y - marginPx && point.Y < far.Y + marginPx;
     }
 
     private void OnPreviewKey(object sender, KeyEventArgs e)
