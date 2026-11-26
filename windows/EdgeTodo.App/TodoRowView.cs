@@ -119,9 +119,9 @@ public sealed class RowView : Grid
 
         _marker = new Border
         {
-            Width = 17,
-            Height = 21,
-            Margin = new Thickness(0, 0, 9, 0),
+            Width = 23,
+            Height = 23,
+            Margin = new Thickness(0, 0, 3, 0),
             VerticalAlignment = VerticalAlignment.Top,
             Background = Brushes.Transparent
         };
@@ -146,11 +146,6 @@ public sealed class RowView : Grid
         _dock.Children.Add(fill);
         RebuildRightActions(row);
         AttachContextMenu();
-
-        if (!row.Saved)
-        {
-            _marker.MouseLeftButtonDown += (_, e) => { FocusAtEnd(); e.Handled = true; };
-        }
 
         _surface.Child = _dock;
         Children.Add(_surface);
@@ -444,6 +439,7 @@ public sealed class RowView : Grid
 
     private void PaintMarker(bool animateCompletion = false)
     {
+        _marker.MouseLeftButtonDown -= FocusDraftMarker;
         _marker.MouseLeftButtonDown -= Toggle;
 
         if (!_row.Saved)
@@ -458,6 +454,7 @@ public sealed class RowView : Grid
                 {
                     Text = "+",
                     FontSize = 15,
+                    Margin = new Thickness(0, 0, 6, 0),
                     HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center
                 };
@@ -465,6 +462,7 @@ public sealed class RowView : Grid
             _plusMark.Foreground = plusColor;
             _marker.Child = _plusMark;
             _marker.Cursor = Cursors.IBeam;
+            _marker.MouseLeftButtonDown += FocusDraftMarker;
             return;
         }
 
@@ -523,8 +521,27 @@ public sealed class RowView : Grid
         _marker.MouseLeftButtonDown += Toggle;
     }
 
+    /**
+     * 点击未保存草稿行前面的“+”标记时，将输入光标聚焦到行尾。
+     * 使用具名方法而非匿名委托，保证草稿保存转为正式待办后能彻底解绑。
+     * @param {object} sender 事件源
+     * @param {MouseButtonEventArgs} e 鼠标按键事件参数
+     */
+    private void FocusDraftMarker(object sender, MouseButtonEventArgs e)
+    {
+        FocusAtEnd();
+        e.Handled = true;
+    }
+
+    /**
+     * 点击复选框切换待办完成状态；若当前行输入框正持有键盘焦点则先清除焦点，避免光标残留在已完成条目上。
+     * @param {object} sender 事件源
+     * @param {MouseButtonEventArgs} e 鼠标按键事件参数
+     */
     private void Toggle(object sender, MouseButtonEventArgs e)
     {
+        if (KeepsText)
+            Keyboard.ClearFocus();
         _window.OnToggle(_row);
         e.Handled = true;
     }
