@@ -951,6 +951,7 @@ public sealed class RowView : Grid
         var menu = new ContextMenu();
         menu.Opened += (_, _) =>
         {
+            _window.HoldContextMenu(true);
             menu.Items.Clear();
             var openItem = new MenuItem { Header = "在 Edge 中打开" };
             openItem.Click += (_, _) => _window.OpenLink(link.Url);
@@ -965,6 +966,7 @@ public sealed class RowView : Grid
             deleteItem.Click += (_, _) => _window.OnDeleteLink(_row);
             menu.Items.Add(deleteItem);
         };
+        menu.Closed += (_, _) => _window.HoldContextMenu(false);
         stack.ContextMenu = menu;
         return stack;
     }
@@ -976,6 +978,8 @@ public sealed class RowView : Grid
     {
         if (_row.Link is not null) return;
         var rowMenu = new ContextMenu();
+        rowMenu.Opened += (_, _) => _window.HoldContextMenu(true);
+        rowMenu.Closed += (_, _) => _window.HoldContextMenu(false);
         ContextMenu = rowMenu;
         ContextMenuOpening += (_, e) =>
         {
@@ -993,6 +997,8 @@ public sealed class RowView : Grid
         if (Editor is not null)
         {
             var editorMenu = new ContextMenu();
+            editorMenu.Opened += (_, _) => _window.HoldContextMenu(true);
+            editorMenu.Closed += (_, _) => _window.HoldContextMenu(false);
             Editor.ContextMenu = editorMenu;
             Editor.ContextMenuOpening += (_, _) =>
             {

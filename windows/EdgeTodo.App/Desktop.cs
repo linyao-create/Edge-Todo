@@ -9,16 +9,20 @@ using Forms = System.Windows.Forms;
 
 namespace EdgeTodo;
 
-public sealed record MonitorInfo(string Device, int Left, int Top, int Right, int Bottom, uint Dpi)
+public sealed record MonitorInfo(string Device, int Left, int Top, int Right, int Bottom, uint Dpi, bool IsLeftSeam = false)
 {
     public int Height => Bottom - Top;
 }
 
 public static class Monitors
 {
+    /**
+     * 枚举全部可用显示器工作区、DPI 以及左边缘是否紧邻另一块屏幕（用于跨屏接缝防误触）。
+     * @returns {List<MonitorInfo>} 显示器信息列表
+     */
     public static List<MonitorInfo> All()
     {
-        var list = new List<MonitorInfo>();
+        var raw = new List<(string Device, Native.Rect Work, ScreenBounds Physical, uint Dpi)>();
         Native.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (hmon, _, _, _) =>
         {
             var info = new Native.MonitorInfoEx { cbSize = Marshal.SizeOf<Native.MonitorInfoEx>() };
@@ -26,10 +30,20 @@ public static class Monitors
             uint dpi = 96;
             try { Native.GetDpiForMonitor(hmon, 0, out dpi, out _); } catch { dpi = 96; }
             if (dpi == 0) dpi = 96;
-            list.Add(new MonitorInfo(info.DeviceName, info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom, dpi));
+            var physical = new ScreenBounds(info.Monitor.Left, info.Monitor.Top, info.Monitor.Right, info.Monitor.Bottom);
+            raw.Add((info.DeviceName, info.Work, physical, dpi));
             return true;
         }, IntPtr.Zero);
-        return list;
+
+        var allBounds = raw.Select(item => item.Physical).ToArray();
+        return raw.Select(item => new MonitorInfo(
+            item.Device,
+            item.Work.Left,
+            item.Work.Top,
+            item.Work.Right,
+            item.Work.Bottom,
+            item.Dpi,
+            EdgeSeamDetector.HasLeftNeighbor(item.Physical, allBounds))).ToList();
     }
 
     public static string DeviceUnderCursor()
